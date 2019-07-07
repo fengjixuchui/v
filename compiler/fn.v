@@ -4,6 +4,8 @@
 
 module main
 
+import strings 
+
 const (
 	MaxLocalVars = 50
 )
@@ -84,13 +86,18 @@ fn (f mut Fn) register_var(v Var) {
 	}
 	else {
 		f.local_vars[f.var_idx] = new_var
-		f.var_idx++
 	}
+	f.var_idx++
+}
+
+fn (f mut Fn) clear_vars() {
+	f.var_idx = 0
+	f.local_vars = []Var
 }
 
 // vlib header file?
 fn (p mut Parser) is_sig() bool {
-	return (p.build_mode == DEFAULT_MODE || p.build_mode == BUILD) &&
+	return (p.pref.build_mode == .default_mode || p.pref.build_mode == .build) &&
 	(p.file_path.contains(TmpPath))
 }
 
@@ -123,7 +130,7 @@ fn (p mut Parser) fn_decl() {
 		is_mut := p.tok == MUT
 		is_amp := p.tok == AMP
 		if is_mut || is_amp {
-			p.next()
+			p.check_space(p.tok) 
 		}
 		receiver_typ = p.get_type()
 		T := p.table.find_type(receiver_typ)
@@ -146,6 +153,7 @@ fn (p mut Parser) fn_decl() {
 			receiver_typ += '*'
 		}
 		p.check(RPAR)
+		p.fspace() 
 		receiver := Var {
 			name: receiver_name
 			is_arg: true
@@ -168,8 +176,8 @@ fn (p mut Parser) fn_decl() {
 	// C function header def? (fn C.NSMakeRect(int,int,int,int))
 	is_c := f.name == 'C' && p.tok == DOT
 	// Just fn signature? only builtin.v + default build mode
-	// is_sig := p.builtin_pkg && p.build_mode == DEFAULT_MODE
-	// is_sig := p.build_mode == DEFAULT_MODE && (p.builtin_pkg || p.file.contains(LANG_TMP))
+	// is_sig := p.builtin_pkg && p.pref.build_mode == default_mode
+	// is_sig := p.pref.build_mode == default_mode && (p.builtin_pkg || p.file.contains(LANG_TMP))
 	is_sig := p.is_sig()
 	// println('\n\nfn decl !!is_sig=$is_sig name=$f.name $p.builtin_pkg')
 	if is_c {
@@ -177,7 +185,7 @@ fn (p mut Parser) fn_decl() {
 		f.name = p.check_name()
 		f.is_c = true
 	}
-	else if !p.translated && !p.file_path.contains('view.v') {
+	else if !p.pref.translated && !p.file_path.contains('view.v') {
 		if contains_capital(f.name) {
 			p.error('function names cannot contain uppercase letters, use snake_case instead')
 		}
@@ -232,7 +240,7 @@ fn (p mut Parser) fn_decl() {
 		typ = p.get_type()
 	}
 	// Translated C code can have empty functions (just definitions)
-	is_fn_header := !is_c && !is_sig && (p.translated || p.is_test) &&
+	is_fn_header := !is_c && !is_sig && (p.pref.translated || p.pref.is_test) &&
 	(p.tok != LCBR)// || (p.tok == NAME && p.peek() != LCBR))
 	if is_fn_header {
 		f.is_decl = true
@@ -253,7 +261,7 @@ fn (p mut Parser) fn_decl() {
 	// println('FN DECL $f.name typ=$f.typ str_args="$str_args"')
 	// Special case for main() args
 	if f.name == 'main' && !has_receiver {
-		if str_args != '' {
+		if str_args != '' || typ != 'void' {
 			p.error('fn main must have no arguments and no return values')
 		}
 		typ = 'int'
@@ -269,10 +277,10 @@ fn (p mut Parser) fn_decl() {
 	// }
 	mut fn_name_cgen := p.table.cgen_name(f)
 	// Start generation of the function body
-	is_live := p.is_live && f.name != 'main' && f.name != 'reload_so'
-	skip_main_in_test := f.name == 'main' && p.is_test
+	is_live := p.pref.is_live && f.name != 'main' && f.name != 'reload_so'
+	skip_main_in_test := f.name == 'main' && p.pref.is_test
 	if !is_c && !is_live && !is_sig && !is_fn_header && !skip_main_in_test {
-		if p.obfuscate {
+		if p.pref.obfuscate {
 			p.genln('; // ${f.name}')
 		}
 		p.genln('$typ $fn_name_cgen($str_args) {')
@@ -327,13 +335,13 @@ fn (p mut Parser) fn_decl() {
 		}
 		// Actual fn declaration!
 		mut fn_decl := '$typ $fn_name_cgen($str_args)'
-		if p.obfuscate {
+		if p.pref.obfuscate {
 			fn_decl += '; // ${f.name}'
 		}
 		// Add function definition to the top
 		if !is_c && f.name != 'main' && p.first_run() {
 			// TODO hack to make Volt compile without -embed_vlib
-			if f.name == 'darwin__nsstring' && p.build_mode == DEFAULT_MODE {
+			if f.name == 'darwin__nsstring' && p.pref.build_mode == .default_mode {
 				return
 			}
 			p.cgen.fns << fn_decl + ';'
@@ -352,13 +360,13 @@ fn (p mut Parser) fn_decl() {
 			}
 		}
 		// We are in live code reload mode, call the .so loader in bg
-		if p.is_live {
+		if p.pref.is_live {
 			p.genln(' 
 load_so("bounce.so"); 
 pthread_t _thread_so;
 pthread_create(&_thread_so , NULL, &reload_so, NULL); ')
 		}
-		if p.is_test && !p.scanner.file_path.contains('/volt') {
+		if p.pref.is_test && !p.scanner.file_path.contains('/volt') {
 			p.error('tests cannot have function `main`')
 		}
 	}
@@ -369,14 +377,14 @@ pthread_create(&_thread_so , NULL, &reload_so, NULL); ')
 		return
 	}
 	// We are in profile mode? Start counting at the beginning of the function (save current time).
-	if p.is_prof && f.name != 'main' && f.name != 'time__ticks' {
+	if p.pref.is_prof && f.name != 'main' && f.name != 'time__ticks' {
 		p.genln('double _PROF_START = time__ticks();//$f.name')
 		cgen_name := p.table.cgen_name(f)
 		f.defer = '  ${cgen_name}_time += time__ticks() - _PROF_START;'
 	}
 	p.statements_no_curly_end()
 	// Print counting result after all statements in main
-	if p.is_prof && f.name == 'main' {
+	if p.pref.is_prof && f.name == 'main' {
 		p.genln(p.print_prof_counters())
 	}
 	// Counting or not, always need to add defer before the end
@@ -398,27 +406,29 @@ pthread_create(&_thread_so , NULL, &reload_so, NULL); ')
 		p.fgenln('\n')
 		return
 	}
-	for var in f.local_vars {
+	p.check_unused_variables()
+	p.cur_fn = EmptyFn
+	p.fgenln('\n')
+	p.genln('}')
+}
+
+fn (p mut Parser) check_unused_variables() {
+	for var in p.cur_fn.local_vars {
 		if var.name == '' {
 			break
 		}
-		if !var.is_used && !var.is_arg && !p.translated && var.name != '_' {
+		if !var.is_used && !p.pref.is_repl && !var.is_arg && !p.pref.translated && var.name != '_' {
 			p.scanner.line_nr = var.line_nr - 1
 			p.error('`$var.name` declared and not used')
 		}
 		// Very basic automatic memory management at the end of the function.
 		// This is inserted right before the final `}`, so if the object is being returned,
 		// the free method will not be called.
-		if p.is_test && var.typ.contains('array_') {
+		if p.pref.is_test && var.typ.contains('array_') {
 			// p.genln('v_${var.typ}_free($var.name); // !!!! XAXA')
 			// p.genln('free(${var.name}.data); // !!!! XAXA')
 		}
 	}
-	// println('end of func decl')
-	// p.print_tok()
-	p.cur_fn = EmptyFn
-	p.fgenln('\n')
-	p.genln('}')
 }
 
 // Important function with 5 args.
@@ -493,19 +503,19 @@ fn (p mut Parser) async_fn_call(f Fn, method_ph int, receiver_var, receiver_type
 }
 
 fn (p mut Parser) fn_call(f Fn, method_ph int, receiver_var, receiver_type string) {
-	if !f.is_public && !f.is_c && !p.is_test && f.pkg != p.pkg  { 
+	if !f.is_public &&  !f.is_c && !p.pref.is_test && !f.is_interface && f.pkg != p.pkg  { 
 		p.error('function `$f.name` is private')
 	}
 	p.calling_c = f.is_c
-	is_print := p.is_prod &&// Hide prints only in prod
-	!p.is_test &&
+	is_print := p.pref.is_prod &&// Hide prints only in prod
+	!p.pref.is_test &&
 	!p.builtin_pkg &&// Allow prints in builtin  pkgs
 	f.is_c && f.name == 'printf'
 	if !p.cgen.nogen {
 		p.cgen.nogen = is_print
 	}
 	cgen_name := p.table.cgen_name(f)
-	// if p.is_prof {
+	// if p.pref.is_prof {
 	// p.cur_fn.called_fns << cgen_name
 	// }
 	// Normal function call
@@ -517,14 +527,6 @@ fn (p mut Parser) fn_call(f Fn, method_ph int, receiver_var, receiver_type strin
 	// If we have a method placeholder,
 	// we need to preappend "method(receiver, ...)"
 	else {
-		// C only knows about functions "array_get", "array_set" etc
-		// TODO I don't need this?
-		// mut cgen_typ := receiver_type.replace('*', '')
-		// if cgen_typ.starts_with('array_') {
-		// cgen_typ = 'array'
-		// }
-		// println('METHOD fn_call name=$cgen_name')
-		// mut method_call := '${cgen_typ}_${cgen_name}('
 		mut method_call := '${cgen_name}('
 		receiver := f.args.first()
 		if receiver.is_mut && !p.expr_var.is_mut {
@@ -539,7 +541,7 @@ fn (p mut Parser) fn_call(f Fn, method_ph int, receiver_var, receiver_type strin
 		if !receiver.is_mut && receiver_type.contains('*') {
 			method_call += '*'
 		}
-		mut cast = ''
+		mut cast := ''
 		// Method returns (void*) => cast it to int, string, user etc
 		// number := *(int*)numbers.first()
 		if f.typ == 'void*' {
@@ -550,10 +552,8 @@ fn (p mut Parser) fn_call(f Fn, method_ph int, receiver_var, receiver_type strin
 		p.cgen.set_placeholder(method_ph, '$cast $method_call')
 	}
 	p.next()
-	// p.check(LPAR)
 	p.fn_call_args(f)
 	p.gen(')')
-	// p.check(RPAR)
 	p.calling_c = false
 	if is_print {
 		p.cgen.nogen = false
@@ -670,7 +670,7 @@ fn (p mut Parser) fn_call_args(f *Fn) *Fn {
 		if i == f.args.len - 1 && arg.name == '..' {
 			break
 		}
-		amp_ph := p.cgen.add_placeholder()
+		ph := p.cgen.add_placeholder()
 		// ) here means not enough args were supplied
 		if p.tok == RPAR {
 			str_args := f.str_args(p.table)// TODO this is C args
@@ -688,39 +688,39 @@ fn (p mut Parser) fn_call_args(f *Fn) *Fn {
 			p.check(MUT)
 		}
 		typ := p.bool_expression()
-		// TODO temporary hack to allow println(777)
+		// Optimize `println`: replace it with `printf` to avoid extra allocations and
+		// function calls. `println(777)` => `printf("%d\n", 777)` 
+		// (If we don't check for void, then V will compile `println(func())`) 
 		if i == 0 && f.name == 'println' && typ != 'string' && typ != 'void' {
-			// If we dont check for void, then V will compile "println(procedure())"
 			T := p.table.find_type(typ)
-			if typ == 'u8' {
-				p.cgen.set_placeholder(amp_ph, 'u8_str(')
+			fmt := p.typ_to_fmt(typ) 
+			if fmt != '' { 
+				p.cgen.cur_line = p.cgen.cur_line.replace('println (', '/*opt*/printf ("' + fmt + '\\n", ')    
+				continue 
+			}  
+			if typ.ends_with('*') {
+				p.cgen.set_placeholder(ph, 'ptr_str(')
+				p.gen(')')
+				continue 
 			}
-			else if T.parent == 'int' {
-				p.cgen.set_placeholder(amp_ph, 'int_str(')
-			}
-			else if typ.ends_with('*') {
-				p.cgen.set_placeholder(amp_ph, 'ptr_str(')
-			}
-			else {
-				// Make sure this type has a `str()` method
-				if !T.has_method('str') {
-					if T.fields.len > 0 {
-						mut index := p.cgen.cur_line.len - 1
-						for index > 0 && p.cgen.cur_line[index] != ` ` { index-- }
-						name := p.cgen.cur_line.right(index + 1)
-						if name == '}' {
-							p.error('`$typ` needs to have method `str() string` to be printable')
-						}
-						p.cgen.cur_line = p.cgen.cur_line.left(index)
-						p.create_type_string(T, name)
-						p.cgen.cur_line.replace(typ, '')
-						p.next()
-						return p.fn_call_args(f)
+			// Make sure this type has a `str()` method
+			if !T.has_method('str') {
+				if T.fields.len > 0 {
+					mut index := p.cgen.cur_line.len - 1
+					for index > 0 && p.cgen.cur_line[index] != ` ` { index-- }
+					name := p.cgen.cur_line.right(index + 1)
+					if name == '}' {
+						p.error('`$typ` needs to have method `str() string` to be printable')
 					}
-					p.error('`$typ` needs to have method `str() string` to be printable')
+					p.cgen.cur_line = p.cgen.cur_line.left(index)
+					p.create_type_string(T, name)
+					p.cgen.cur_line.replace(typ, '')
+					p.next()
+					return p.fn_call_args(f)
 				}
-				p.cgen.set_placeholder(amp_ph, '${typ}_str(')
+				p.error('`$typ` needs to have method `str() string` to be printable')
 			}
+			p.cgen.set_placeholder(ph, '${typ}_str(')
 			p.gen(')')
 			continue
 		}
@@ -737,7 +737,7 @@ fn (p mut Parser) fn_call_args(f *Fn) *Fn {
 		if !is_interface {
 			// Dereference
 			if got.contains('*') && !expected.contains('*') {
-				p.cgen.set_placeholder(amp_ph, '*')
+				p.cgen.set_placeholder(ph, '*')
 			}
 			// Reference
 			// TODO ptr hacks. DOOM hacks, fix please.
@@ -746,14 +746,14 @@ fn (p mut Parser) fn_call_args(f *Fn) *Fn {
 				if ! (expected == 'void*' && got == 'int') &&
 				! (expected == 'byte*' && got.contains(']byte')) &&
 				! (expected == 'byte*' && got == 'string') {
-					p.cgen.set_placeholder(amp_ph, '& /*11 EXP:"$expected" GOT:"$got" */')
+					p.cgen.set_placeholder(ph, '& /*11 EXP:"$expected" GOT:"$got" */')
 				}
 			}
 		}
 		// interface?
 		if is_interface {
 			if !got.contains('*') {
-				p.cgen.set_placeholder(amp_ph, '&')
+				p.cgen.set_placeholder(ph, '&')
 			}
 			// Pass all interface methods
 			interface_type := p.table.find_type(arg.typ)
@@ -811,7 +811,7 @@ fn contains_capital(s string) bool {
 
 // "fn (int, string) int"
 fn (f Fn) typ_str() string {
-	mut sb := new_string_builder(50)
+	mut sb := strings.new_builder(50)
 	sb.write('fn (')
 	for i, arg in f.args {
 		sb.write(arg.typ)
@@ -856,4 +856,3 @@ fn (f &Fn) str_args(table *Table) string {
 	}
 	return s
 }
-

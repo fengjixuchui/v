@@ -1,6 +1,6 @@
 import time
 
-fn print_field(field[]array_int) {
+fn print_field(field []array_int) {
 	for line in field {
 		mut s := '    '
 		for j, cell in line {
@@ -73,7 +73,7 @@ fn main() {
 		}
 		field = new_field
 		print_field(field)
-		time.sleep(time.milliseconds(100))
+		time.sleep_ms(100)
 	}
 }
 
